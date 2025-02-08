@@ -2,6 +2,7 @@ package wordclouds
 
 import (
 	"image"
+	"image/color"
 	"math"
 	"math/rand"
 	"runtime"
@@ -14,18 +15,47 @@ import (
 	"golang.org/x/image/font"
 )
 
+type FontDrawingContextI interface {
+	SetFontFace(face font.Face)
+}
+
+type VectorDrawingContextI interface {
+	SetColor(col color.Color)
+	MeasureString(s string) (w, h float64)
+	// DrawStringAnchored draws the specified text at the specified anchor point.
+	// The anchor point is x - w * ax, y - h * ay, where w, h is the size of the
+	// text. Use ax=0.5, ay=0.5 to center the text at the specified point.
+	DrawStringAnchored(s string, x, y, ax, ay float64)
+	Width() int
+	Height() int
+	DrawRectangle(x, y, w, h float64)
+	Stroke()
+	Clear()
+	SetRGB(r, g, b float64)
+}
+type PixelDrawingContextI interface {
+	Image() image.Image
+}
+type DrawingContextI interface {
+	VectorDrawingContextI
+	PixelDrawingContextI
+	FontDrawingContextI
+}
+
 type wordCount struct {
 	word  string
 	count int
 	size  float64
 }
+type HookFunc func(word string, x, y, w, h float64, col color.Color, size float64)
 
 // Wordcloud object. Create one with NewWordcloud and use Draw() to get the image
 type Wordcloud struct {
-	wordList        map[string]int
-	sortedWordList  []wordCount
-	grid            *spatialHashMap
-	dc              *gg.Context
+	wordList       map[string]int
+	sortedWordList []wordCount
+	grid           *spatialHashMap
+	dc             *gg.Context
+	//dc              DrawingContextI
 	randomPlacement bool
 	width           float64
 	height          float64
@@ -33,6 +63,7 @@ type Wordcloud struct {
 	circles         map[float64]*circle
 	fonts           map[float64]font.Face
 	radii           []float64
+	hook            HookFunc
 }
 
 // Initialize a wordcloud based on a map of word frequency.
@@ -67,7 +98,9 @@ func NewWordcloud(wordList map[string]int, options ...Option) *Wordcloud {
 		}
 	}
 
-	dc := gg.NewContext(opts.Width, opts.Height)
+	//var dc DrawingContextI
+	var dc *gg.Context
+	dc = gg.NewContext(opts.Width, opts.Height)
 	dc.SetColor(opts.BackgroundColor)
 	dc.Clear()
 	dc.SetRGB(0, 0, 0)
@@ -106,6 +139,9 @@ func NewWordcloud(wordList map[string]int, options ...Option) *Wordcloud {
 		fonts:           make(map[float64]font.Face),
 		radii:           radii,
 	}
+}
+func (w *Wordcloud) SetHook(hook HookFunc) {
+	w.hook = hook
 }
 
 func (w *Wordcloud) getPreciseBoundingBoxes(b *Box) []*Box {
@@ -155,7 +191,12 @@ func (w *Wordcloud) Place(wc wordCount) bool {
 	if !space {
 		return false
 	}
-	w.dc.DrawStringAnchored(wc.word, x, y, 0.5, 0.5)
+	ax := 0.5
+	ay := 0.5
+	w.dc.DrawStringAnchored(wc.word, x, y, ax, ay)
+	if w.hook != nil {
+		w.hook(wc.word, x-ax*(width-5), y+ay*(height-5), width, height, c, wc.size)
+	}
 
 	box := &Box{
 		y + height/2 + 0.3*height,

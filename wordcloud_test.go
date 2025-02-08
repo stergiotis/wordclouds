@@ -56,6 +56,7 @@ func TestWordcloud_Draw(t *testing.T) {
 		MaskBoxes(boxes),
 		Height(2048),
 		Width(2048),
+		Debug(),
 	)
 
 	t.Logf("Wordcloud init took %v", time.Since(t0))
