@@ -1,17 +1,20 @@
 package wordclouds
 
 import (
+	"fmt"
 	"image"
 	"image/color"
+	"iter"
 	"math"
 	"math/rand"
 	"runtime"
-	"sort"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/fogleman/gg"
+	"github.com/stergiotis/boxer/public/containers/co"
+	"github.com/stergiotis/boxer/public/math32"
+	"golang.org/x/exp/slices"
 	"golang.org/x/image/font"
 )
 
@@ -42,19 +45,14 @@ type DrawingContextI interface {
 	FontDrawingContextI
 }
 
-type wordCount struct {
-	word  string
-	count int
-	size  float64
-}
 type HookFunc func(word string, x, y, w, h float64, col color.Color, size float64)
 
 // Wordcloud object. Create one with NewWordcloud and use Draw() to get the image
 type Wordcloud struct {
-	wordList       map[string]int
-	sortedWordList []wordCount
-	grid           *spatialHashMap
-	dc             *gg.Context
+	sortedWordList *WordDataCoArrays
+
+	grid *spatialHashMap
+	dc   *gg.Context
 	//dc              DrawingContextI
 	randomPlacement bool
 	width           float64
@@ -65,37 +63,112 @@ type Wordcloud struct {
 	radii           []float64
 	hook            HookFunc
 }
+type WordDataCoArrays struct {
+	Word       []string
+	Count      []int
+	ColorIndex []uint16
 
-// Initialize a wordcloud based on a map of word frequency.
-func NewWordcloud(wordList map[string]int, options ...Option) *Wordcloud {
+	FontSize []float32
+	Pos      []complex64
+	Rect     []complex64
+}
+
+func NewWordDataCoArrays(estSize int) *WordDataCoArrays {
+	return &WordDataCoArrays{
+		Word:       make([]string, 0, estSize),
+		Count:      make([]int, 0, estSize),
+		ColorIndex: make([]uint16, 0, estSize),
+		FontSize:   make([]float32, 0, estSize),
+		Pos:        make([]complex64, 0, estSize),
+		Rect:       make([]complex64, 0, estSize),
+	}
+}
+
+var notPlacedPos = complex64(complex(math32.Inf(-1), float32(0.0)))
+
+func (inst *WordDataCoArrays) Add(word string, count int, colorIndex uint16) {
+	inst.Word = append(inst.Word, word)
+	inst.Count = append(inst.Count, count)
+	inst.ColorIndex = append(inst.ColorIndex, colorIndex)
+}
+func (inst *WordDataCoArrays) Prepare() {
+	n := len(inst.Word)
+	inst.FontSize = slices.Grow(inst.FontSize[:0], n)[:n]
+	pos := slices.Grow(inst.Pos[:0], n)[:n]
+	for i := 0; i < n; i++ {
+		pos[i] = notPlacedPos
+	}
+	inst.Pos = pos
+	inst.Rect = slices.Grow(inst.Rect[:0], n)[:n]
+}
+func (inst *WordDataCoArrays) Reset() {
+	inst.Word = inst.Word[:0]
+	inst.Count = inst.Count[:0]
+	inst.ColorIndex = inst.ColorIndex[:0]
+	inst.FontSize = inst.FontSize[:0]
+	inst.Pos = inst.Pos[:0]
+	inst.Rect = inst.Rect[:0]
+}
+func (inst *WordDataCoArrays) Length() int {
+	return len(inst.Word)
+}
+func (inst *WordDataCoArrays) PlacedCount() (n int) {
+	for _, p := range inst.Pos {
+		if p != notPlacedPos {
+			n++
+		}
+	}
+	return
+}
+func (inst *WordDataCoArrays) ApplyColorPaletteSize(sz uint16) {
+	ci := inst.ColorIndex
+	for i, idx := range ci {
+		ci[i] = idx % sz
+	}
+}
+func (inst *WordDataCoArrays) AllPlaced() iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for i, p := range inst.Pos {
+			if p != notPlacedPos {
+				if !yield(i) {
+					break
+				}
+			}
+		}
+	}
+}
+
+func (inst *WordDataCoArrays) SortByCount() {
+	co.CoSortSlicesReverse(inst.Count, func(i int, j int) {
+		w := inst.Word
+		w[j], w[i] = w[i], w[j]
+		u := inst.ColorIndex
+		u[j], u[i] = u[i], u[j]
+	})
+}
+
+func NewWordcloud(sortedWordList *WordDataCoArrays, options ...Option) *Wordcloud {
 	opts := defaultOptions
 	for _, opt := range options {
 		opt(&opts)
 	}
 
-	sortedWordList := make([]wordCount, 0, len(wordList))
-	for word, count := range wordList {
-		sortedWordList = append(sortedWordList, wordCount{
-			word:  strings.Trim(word, " "),
-			count: count,
-			size:  5,
-		})
+	wordCountMaxInt := sortedWordList.Count[0]
+	wordCountMax := float64(wordCountMaxInt)
 
-	}
-	sort.Slice(sortedWordList, func(i, j int) bool {
-		return sortedWordList[i].count > sortedWordList[j].count
-	})
-
-	wordCountMax := float64(sortedWordList[0].count)
-
-	for idx := range sortedWordList {
-		word := &sortedWordList[idx]
-		word.size =
-			opts.SizeFunction(float64(word.count)/wordCountMax) *
-				float64(opts.FontMaxSize)
-		if word.size < float64(opts.FontMinSize) {
-			word.size = float64(opts.FontMinSize)
+	sortedWordList.Prepare()
+	sizes := sortedWordList.FontSize
+	m := wordCountMaxInt
+	for idx, count := range sortedWordList.Count {
+		if count > m {
+			panic(fmt.Sprintf("not sorted: idx=%d, m=%d, count=%d", idx, m, count))
 		}
+		size := opts.SizeFunction(float64(count)/wordCountMax) * float64(opts.FontMaxSize)
+		if size < float64(opts.FontMinSize) {
+			size = float64(opts.FontMinSize)
+		}
+		sizes[idx] = float32(size)
+		m = count
 	}
 
 	//var dc DrawingContextI
@@ -127,7 +200,6 @@ func NewWordcloud(wordList map[string]int, options ...Option) *Wordcloud {
 	rand.Seed(time.Now().UnixNano())
 
 	return &Wordcloud{
-		wordList:        wordList,
 		sortedWordList:  sortedWordList,
 		grid:            grid,
 		dc:              dc,
@@ -165,38 +237,50 @@ func (w *Wordcloud) getPreciseBoundingBoxes(b *Box) []*Box {
 }
 
 func (w *Wordcloud) setFont(size float64) {
-	_, ok := w.fonts[size]
+	// TODO do not call w.dc.SetFontFace if previously set with same value
+	size = math.Round(size) // FIXME linear
+	f, ok := w.fonts[size]
 
 	if !ok {
-		f, err := gg.LoadFontFace(w.opts.FontFile, size)
+		var err error
+		f, err = gg.LoadFontFace(w.opts.FontFile, size)
 		if err != nil {
 			panic(err)
 		}
-		w.fonts[size] = f
+		if len(w.fonts) > 100 {
+			panic("more than 100 distinct font sizes")
+		} else {
+			w.fonts[size] = f
+		}
 	}
 
-	w.dc.SetFontFace(w.fonts[size])
+	w.dc.SetFontFace(f)
 }
 
-func (w *Wordcloud) Place(wc wordCount) bool {
-	c := w.opts.Colors[rand.Intn(len(w.opts.Colors))]
-	w.dc.SetColor(c)
+func (w *Wordcloud) Place(idx int) bool {
+	data := w.sortedWordList
+	word := data.Word[idx]
 
-	w.setFont(wc.size)
-	width, height := w.dc.MeasureString(wc.word)
+	colors := w.opts.Colors
+	c := colors[int(data.ColorIndex[idx])%len(colors)]
+	w.dc.SetColor(c)
+	w.setFont(float64(data.FontSize[idx]))
+
+	width, height := w.dc.MeasureString(word)
 
 	width += 5
 	height += 5
 	x, y, space := w.nextPos(width, height)
 	if !space {
+		data.Pos[idx] = notPlacedPos
+		data.Rect[idx] = 0.0
 		return false
 	}
-	ax := 0.5
-	ay := 0.5
-	w.dc.DrawStringAnchored(wc.word, x, y, ax, ay)
-	if w.hook != nil {
-		w.hook(wc.word, x-ax*(width-5), y+ay*(height-5), width, height, c, wc.size)
-	}
+	const ax = 0.5
+	const ay = 0.5
+	w.dc.DrawStringAnchored(word, x, y, ax, ay)
+	data.Pos[idx] = complex(float32(x-ax*(width-5)), float32(y-ay*(height-5)))
+	data.Rect[idx] = complex(float32(width-5), float32(height-5))
 
 	box := &Box{
 		y + height/2 + 0.3*height,
@@ -222,8 +306,9 @@ func (w *Wordcloud) Place(wc wordCount) bool {
 // Draw tries to place words one by one, starting with the ones with the highest counts
 func (w *Wordcloud) Draw() image.Image {
 	consecutiveMisses := 0
-	for _, wc := range w.sortedWordList {
-		success := w.Place(wc)
+	l := w.sortedWordList.Length()
+	for i := 0; i < l; i++ {
+		success := w.Place(i)
 		if !success {
 			consecutiveMisses++
 			if consecutiveMisses > 10 {
