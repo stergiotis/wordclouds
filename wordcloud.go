@@ -13,7 +13,7 @@ import (
 
 	"github.com/fogleman/gg"
 	"github.com/stergiotis/boxer/public/containers/co"
-	"github.com/stergiotis/boxer/public/math32"
+	"github.com/stergiotis/boxer/public/math/math32"
 	"golang.org/x/exp/slices"
 	"golang.org/x/image/font"
 )
